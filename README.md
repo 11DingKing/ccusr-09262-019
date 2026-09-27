@@ -18,6 +18,8 @@
   输入指纹与结果指纹（规范化 JSON 的 SHA-256）。复算严格按固化版本取数。
 - **授权粒度**：机构仅能访问被授权的 `项目 × 指标类别 × 权限`；
   主管单位（`X-Role: supervisor`）拥有全部范围。
+- **复核服务时限**：复核案件按机构日历（本地工作窗口 + 节假日，固定时区偏移）
+  计时；暂停期间不计时；超时由扫描生成升级记录（每案件恰好一次，落 SQLite）。
 - **幂等与断点恢复**：计算任务以幂等键去重；计算分
   `snapshot → convert → aggregate → persist` 四步，每步落检查点，
   失败/崩溃后再次执行从断点续跑，重复执行收敛为同一份报告。
@@ -28,8 +30,8 @@
 
 | 层 | 位置 | 职责 |
 | --- | --- | --- |
-| 领域模型 | `service_09252_010/domain/` | 指标/版本/规则/报告、期间窗口、公式求值、换算、指纹 |
-| 应用服务 | `service_09252_010/services/` | 指标登记、导入、会签、计算、复核、导出、授权 |
+| 领域模型 | `service_09252_010/domain/` | 指标/版本/规则/报告、期间窗口、机构日历、公式求值、换算、指纹 |
+| 应用服务 | `service_09252_010/services/` | 指标登记、导入、会签、计算、复核、导出、授权、服务时限 |
 | 持久化 | `service_09252_010/persistence/` | SQLite 模式、工作单元、仓储 |
 | 接口边界 | `service_09252_010/interfaces/wsgi_app.py` | WSGI 路由与 JSON 错误映射 |
 | 端口 | `service_09252_010/ports.py` | 可替换的时钟与标识生成器（测试用确定性实现） |
@@ -60,6 +62,15 @@
 | `POST /reports/{report_id}/review` | 复核通过/驳回（复核人不得是原计算人） |
 | `POST /reports/{report_id}/exports` | 导出复核通过的报告（含换算依据与证据清单） |
 | `POST /grants` | 主管单位配置机构授权 |
+| `POST /sla/calendars` | 登记机构日历（时区偏移、每周工作窗口、节假日） |
+| `GET  /sla/calendars/{institution_id}` | 查看机构日历 |
+| `POST /review-cases` | 开立复核案件（`limit_business_hours` 为工作小时预算） |
+| `GET  /review-cases?institution_id=...` | 案件列表（机构仅见本机构） |
+| `GET  /review-cases/{case_id}` | 案件状态：已用/剩余工作秒、是否超时、超时时刻 |
+| `POST /review-cases/{case_id}/pause` / `resume` | 暂停 / 恢复计时（暂停期间不计时） |
+| `POST /review-cases/{case_id}/close` | 办结案件（终态，不再计时与升级） |
+| `POST /review-cases/sweep` | 超时扫描：为已超时未办结案件生成升级记录（幂等） |
+| `GET  /review-cases/{case_id}/escalations` | 案件的升级记录 |
 
 错误统一为 `{ "error": <码>, "message": ..., "detail": ... }`，
 HTTP 状态：403 未授权、404 不存在、409 冲突、422 校验/缺失数据。
@@ -83,7 +94,9 @@ python3 -m unittest discover -s tests -v
 覆盖场景：缺失值三种策略（skip/zero/fail）、跨年度观察期窗口、
 迟到数据新版本与差异、撤回记录、并发会签恰好生效一次、
 幂等提交与并发收敛、断点恢复与失败标记、指标更新不可改写旧报告、
-规则回滚仅影响新报告、授权粒度过滤、复核独立性与导出留痕、HTTP 全链路。
+规则回滚仅影响新报告、授权粒度过滤、复核独立性与导出留痕、HTTP 全链路；
+复核服务时限：跨午夜请求的超时状态、节假日顺延、暂停不计时、
+升级记录幂等生成与办结终态。
 
 ## 编译检查
 

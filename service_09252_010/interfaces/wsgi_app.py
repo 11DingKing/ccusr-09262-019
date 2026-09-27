@@ -77,6 +77,17 @@ class Application:
             ("POST", ("reports", "{report_id}", "exports"), self._export_report),
             ("GET", ("reports", "{report_id}"), self._get_report),
             ("POST", ("grants",), self._create_grant),
+            ("POST", ("sla", "calendars"), self._register_calendar),
+            ("GET", ("sla", "calendars", "{institution_id}"), self._get_calendar),
+            ("POST", ("review-cases",), self._open_case),
+            ("GET", ("review-cases",), self._list_cases),
+            ("POST", ("review-cases", "sweep"), self._sweep_cases),
+            ("GET", ("review-cases", "{case_id}"), self._get_case),
+            ("POST", ("review-cases", "{case_id}", "pause"), self._pause_case),
+            ("POST", ("review-cases", "{case_id}", "resume"), self._resume_case),
+            ("POST", ("review-cases", "{case_id}", "close"), self._close_case),
+            ("GET", ("review-cases", "{case_id}", "escalations"),
+             self._list_case_escalations),
         ]
 
     def __call__(self, env: dict, start_response) -> list[bytes]:
@@ -290,6 +301,54 @@ class Application:
                       body.get("category", "*"), permission),
             )
         return 201, {"granted": True}
+
+    # ---- 复核服务时限 ----
+    def _register_calendar(self, p: Principal, body: dict, ctx: Context):
+        result = ctx.container.sla.register_calendar(
+            p, institution_id=body["institution_id"],
+            tz_offset=body["tz_offset"], work_windows=body["work_windows"],
+            holidays=body.get("holidays"),
+        )
+        return 201, result
+
+    def _get_calendar(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.sla.get_calendar(ctx.match["institution_id"])
+
+    def _open_case(self, p: Principal, body: dict, ctx: Context):
+        result = ctx.container.sla.open_case(
+            p, title=body["title"],
+            limit_business_hours=body["limit_business_hours"],
+            institution_id=body.get("institution_id"),
+            report_id=body.get("report_id"),
+        )
+        return 201, result
+
+    def _list_cases(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.sla.list_cases(
+            p, institution_id=ctx.query("institution_id")
+        )
+
+    def _get_case(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.sla.case_status(p, ctx.match["case_id"])
+
+    def _pause_case(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.sla.pause_case(
+            p, ctx.match["case_id"], reason=body.get("reason", "")
+        )
+
+    def _resume_case(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.sla.resume_case(p, ctx.match["case_id"])
+
+    def _close_case(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.sla.close_case(
+            p, ctx.match["case_id"], reason=body.get("reason", "")
+        )
+
+    def _sweep_cases(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.sla.sweep(p)
+
+    def _list_case_escalations(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.sla.list_escalations(p, ctx.match["case_id"])
 
 
 def _not_found(message: str):

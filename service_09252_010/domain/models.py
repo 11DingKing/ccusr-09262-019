@@ -41,6 +41,14 @@ class ReportStatus(str, Enum):
     REJECTED = "rejected"  # 复核驳回（终态）
 
 
+class CaseState(str, Enum):
+    """复核案件（服务时限）的生命周期。"""
+
+    OPEN = "open"  # 计时中
+    PAUSED = "paused"  # 暂停（暂停期间不计时）
+    CLOSED = "closed"  # 已办结（终态）
+
+
 # 计算任务的断点步骤，顺序即执行顺序。
 CALCULATION_STEPS: tuple[str, ...] = ("snapshot", "convert", "aggregate", "persist")
 
@@ -175,6 +183,45 @@ class Report:
     created_by: str
     created_at: str
     task_id: str
+
+
+@dataclass(frozen=True)
+class ReviewCase:
+    """复核案件：按机构日历计时的服务时限对象。"""
+
+    id: str
+    institution_id: str
+    title: str
+    report_id: str | None  # 关联的待复核报告（可选）
+    limit_seconds: int  # 服务时限预算（工作秒）
+    state: CaseState
+    opened_by: str
+    opened_at: str
+    closed_at: str | None
+
+
+@dataclass(frozen=True)
+class PauseInterval:
+    """案件的一段暂停区间；ended_at 为 None 表示仍在暂停。"""
+
+    case_id: str
+    started_at: str
+    ended_at: str | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class Escalation:
+    """升级记录：案件超时后生成，每案件恰好一次。"""
+
+    id: str
+    case_id: str
+    level: int
+    breached_at: str  # 推算出的超时时刻
+    detected_at: str  # 扫描发现时刻
+    elapsed_business_seconds: float
+    limit_seconds: int
+    created_by: str
 
 
 @dataclass(frozen=True)

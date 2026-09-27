@@ -16,6 +16,7 @@ from service_09252_010.services.export import ExportService
 from service_09252_010.services.imports import ImportService
 from service_09252_010.services.indicators import IndicatorService
 from service_09252_010.services.review import ReviewService
+from service_09252_010.services.sla import ReviewSlaService
 
 SUPERVISOR = Principal(institution_id="主管单位", role="supervisor")
 INST_A = Principal(institution_id="机构A", role="officer")
@@ -50,6 +51,28 @@ class SeqIds:
         return f"{prefix}-{self._n:04d}"
 
 
+class ManualClock:
+    """可手动设定/推进的时钟，用于服务时限等时间敏感场景。"""
+
+    def __init__(self, start: str = "2026-01-01T00:00:00+00:00") -> None:
+        self._now = datetime.fromisoformat(start)
+        if self._now.tzinfo is None:
+            self._now = self._now.replace(tzinfo=timezone.utc)
+
+    def set(self, iso: str) -> None:
+        self._now = datetime.fromisoformat(iso)
+        if self._now.tzinfo is None:
+            self._now = self._now.replace(tzinfo=timezone.utc)
+
+    def advance(self, **kwargs) -> None:
+        self._now += timedelta(**kwargs)
+
+    def now(self) -> str:
+        return self._now.astimezone(timezone.utc).isoformat(
+            timespec="microseconds"
+        )
+
+
 class Rig:
     """一套围绕临时数据库装配好的服务。数据库文件位于系统临时目录。"""
 
@@ -63,6 +86,7 @@ class Rig:
         self.calculation = CalculationService(self.db, self.clock, self.ids)
         self.review = ReviewService(self.db, self.clock)
         self.exports = ExportService(self.db, self.clock, self.ids)
+        self.sla = ReviewSlaService(self.db, self.clock, self.ids)
 
     def grant(self, institution: str, project: str = PROJECT,
               category: str = "*", permission: str = "view") -> None:

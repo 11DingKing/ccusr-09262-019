@@ -4,16 +4,25 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from ..domain.calendar import (
+    InstitutionCalendar,
+    windows_from_jsonable,
+    windows_to_jsonable,
+)
 from ..domain.models import (
+    CaseState,
     ConversionRule,
+    Escalation,
     EvidenceSource,
     Grant,
     ImportBatch,
     Indicator,
     IndicatorVersion,
     Observation,
+    PauseInterval,
     Report,
     ReportStatus,
+    ReviewCase,
     RuleStatus,
     TaskStatus,
     ComputationTask,
@@ -462,3 +471,159 @@ class Store:
             (report_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---- 复核服务时限：机构日历 ----
+    def upsert_calendar(self, cal: InstitutionCalendar, updated_by: str,
+                        updated_at: str) -> None:
+        self.conn.execute(
+            "INSERT INTO sla_calendars (institution_id, tz_offset_minutes,"
+            " work_windows_json, holidays_json, updated_by, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(institution_id) DO UPDATE SET"
+            " tz_offset_minutes = excluded.tz_offset_minutes,"
+            " work_windows_json = excluded.work_windows_json,"
+            " holidays_json = excluded.holidays_json,"
+            " updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+            (cal.institution_id, cal.tz_offset_minutes,
+             json.dumps(windows_to_jsonable(cal.work_windows), sort_keys=True),
+             json.dumps(sorted(cal.holidays)), updated_by, updated_at),
+        )
+
+    def get_calendar(self, institution_id: str) -> InstitutionCalendar | None:
+        row = self.conn.execute(
+            "SELECT * FROM sla_calendars WHERE institution_id = ?",
+            (institution_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return InstitutionCalendar(
+            institution_id=row["institution_id"],
+            tz_offset_minutes=row["tz_offset_minutes"],
+            work_windows=windows_from_jsonable(json.loads(row["work_windows_json"])),
+            holidays=frozenset(json.loads(row["holidays_json"])),
+        )
+
+    # ---- 复核服务时限：案件 ----
+    def add_case(self, case: ReviewCase) -> None:
+        self.conn.execute(
+            "INSERT INTO review_cases (id, institution_id, title, report_id,"
+            " limit_seconds, state, opened_by, opened_at, closed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (case.id, case.institution_id, case.title, case.report_id,
+             case.limit_seconds, case.state.value, case.opened_by,
+             case.opened_at, case.closed_at),
+        )
+
+    def get_case(self, case_id: str) -> ReviewCase | None:
+        row = self.conn.execute(
+            "SELECT * FROM review_cases WHERE id = ?", (case_id,)
+        ).fetchone()
+        return self._to_case(row) if row else None
+
+    def list_cases(self, institution_id: str | None = None) -> list[ReviewCase]:
+        if institution_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM review_cases ORDER BY opened_at, id"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM review_cases WHERE institution_id = ?"
+                " ORDER BY opened_at, id",
+                (institution_id,),
+            ).fetchall()
+        return [self._to_case(r) for r in rows]
+
+    def list_active_cases(self) -> list[ReviewCase]:
+        """未办结（计时中或暂停中）的案件，供超时扫描。"""
+        rows = self.conn.execute(
+            "SELECT * FROM review_cases WHERE state IN ('open', 'paused')"
+            " ORDER BY opened_at, id"
+        ).fetchall()
+        return [self._to_case(r) for r in rows]
+
+    def set_case_state(self, case_id: str, state: CaseState,
+                       closed_at: str | None = None) -> None:
+        self.conn.execute(
+            "UPDATE review_cases SET state = ?, closed_at = ? WHERE id = ?",
+            (state.value, closed_at, case_id),
+        )
+
+    @staticmethod
+    def _to_case(row: sqlite3.Row) -> ReviewCase:
+        return ReviewCase(
+            id=row["id"],
+            institution_id=row["institution_id"],
+            title=row["title"],
+            report_id=row["report_id"],
+            limit_seconds=row["limit_seconds"],
+            state=CaseState(row["state"]),
+            opened_by=row["opened_by"],
+            opened_at=row["opened_at"],
+            closed_at=row["closed_at"],
+        )
+
+    # ---- 复核服务时限：暂停区间 ----
+    def add_pause(self, case_id: str, started_at: str,
+                  reason: str | None) -> None:
+        self.conn.execute(
+            "INSERT INTO review_case_pauses (case_id, started_at, ended_at, reason)"
+            " VALUES (?, ?, NULL, ?)",
+            (case_id, started_at, reason),
+        )
+
+    def close_open_pause(self, case_id: str, ended_at: str) -> None:
+        self.conn.execute(
+            "UPDATE review_case_pauses SET ended_at = ?"
+            " WHERE case_id = ? AND ended_at IS NULL",
+            (ended_at, case_id),
+        )
+
+    def list_pauses(self, case_id: str) -> list[PauseInterval]:
+        rows = self.conn.execute(
+            "SELECT case_id, started_at, ended_at, reason"
+            " FROM review_case_pauses WHERE case_id = ? ORDER BY id",
+            (case_id,),
+        ).fetchall()
+        return [PauseInterval(**dict(r)) for r in rows]
+
+    # ---- 复核服务时限：升级记录 ----
+    def add_escalation(self, esc: Escalation) -> None:
+        self.conn.execute(
+            "INSERT INTO sla_escalations (id, case_id, level, breached_at,"
+            " detected_at, elapsed_business_seconds, limit_seconds, created_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (esc.id, esc.case_id, esc.level, esc.breached_at, esc.detected_at,
+             esc.elapsed_business_seconds, esc.limit_seconds, esc.created_by),
+        )
+
+    def escalation_for_case(self, case_id: str) -> Escalation | None:
+        row = self.conn.execute(
+            "SELECT * FROM sla_escalations WHERE case_id = ?", (case_id,)
+        ).fetchone()
+        return self._to_escalation(row) if row else None
+
+    def list_escalations(self, case_id: str | None = None) -> list[Escalation]:
+        if case_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM sla_escalations ORDER BY detected_at, id"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM sla_escalations WHERE case_id = ?"
+                " ORDER BY detected_at, id",
+                (case_id,),
+            ).fetchall()
+        return [self._to_escalation(r) for r in rows]
+
+    @staticmethod
+    def _to_escalation(row: sqlite3.Row) -> Escalation:
+        return Escalation(
+            id=row["id"],
+            case_id=row["case_id"],
+            level=row["level"],
+            breached_at=row["breached_at"],
+            detected_at=row["detected_at"],
+            elapsed_business_seconds=row["elapsed_business_seconds"],
+            limit_seconds=row["limit_seconds"],
+            created_by=row["created_by"],
+        )

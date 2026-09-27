@@ -145,6 +145,45 @@ CREATE TABLE IF NOT EXISTS exports (
     exported_at TEXT NOT NULL,
     digest TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sla_calendars (
+    institution_id TEXT PRIMARY KEY,
+    tz_offset_minutes INTEGER NOT NULL,
+    work_windows_json TEXT NOT NULL,
+    holidays_json TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS review_cases (
+    id TEXT PRIMARY KEY,
+    institution_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    report_id TEXT,
+    limit_seconds INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    opened_by TEXT NOT NULL,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_review_cases_state ON review_cases (state);
+CREATE TABLE IF NOT EXISTS review_case_pauses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id TEXT NOT NULL REFERENCES review_cases(id),
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_review_case_pauses_case
+    ON review_case_pauses (case_id);
+CREATE TABLE IF NOT EXISTS sla_escalations (
+    id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL UNIQUE REFERENCES review_cases(id),
+    level INTEGER NOT NULL,
+    breached_at TEXT NOT NULL,
+    detected_at TEXT NOT NULL,
+    elapsed_business_seconds REAL NOT NULL,
+    limit_seconds INTEGER NOT NULL,
+    created_by TEXT NOT NULL
+);
 """
 
 

@@ -17,6 +17,7 @@ from .services.export import ExportService
 from .services.imports import ImportService
 from .services.indicators import IndicatorService
 from .services.review import ReviewService
+from .services.sla import ReviewSlaService
 
 
 class Container:
@@ -34,3 +35,4 @@ class Container:
         self.calculation = CalculationService(self.db, self.clock, self.ids)
         self.review = ReviewService(self.db, self.clock)
         self.exports = ExportService(self.db, self.clock, self.ids)
+        self.sla = ReviewSlaService(self.db, self.clock, self.ids)
