@@ -77,6 +77,16 @@ class Application:
             ("POST", ("reports", "{report_id}", "exports"), self._export_report),
             ("GET", ("reports", "{report_id}"), self._get_report),
             ("POST", ("grants",), self._create_grant),
+            ("POST", ("sla", "calendars"), self._register_sla_calendar),
+            ("GET", ("sla", "calendars", "{institution_id}"), self._get_sla_calendar),
+            ("POST", ("sla", "policies"), self._set_sla_policy),
+            ("POST", ("sla", "sweep"), self._sla_sweep),
+            ("GET", ("reports", "{report_id}", "sla"), self._sla_status),
+            ("POST", ("reports", "{report_id}", "sla", "pause"), self._sla_pause),
+            ("POST", ("reports", "{report_id}", "sla", "resume"), self._sla_resume),
+            ("POST", ("reports", "{report_id}", "sla", "evaluate"),
+             self._sla_evaluate),
+            ("GET", ("escalations",), self._list_escalations),
         ]
 
     def __call__(self, env: dict, start_response) -> list[bytes]:
@@ -105,15 +115,20 @@ class Application:
         return [body]
 
     @staticmethod
-    def _header(env: dict, name: str) -> str | None:
-        """读取头并还原 UTF-8（CGI 服务器按 Latin-1 解码原始字节）。"""
-        raw = env.get(name)
-        if raw is None:
-            return None
+    def _recode(raw: str) -> str:
+        """还原 UTF-8（CGI 服务器按 Latin-1 解码原始字节）。"""
         try:
             return raw.encode("latin-1").decode("utf-8")
         except (UnicodeEncodeError, UnicodeDecodeError):
             return raw
+
+    @classmethod
+    def _header(cls, env: dict, name: str) -> str | None:
+        """读取头并还原 UTF-8。"""
+        raw = env.get(name)
+        if raw is None:
+            return None
+        return cls._recode(raw)
 
     @classmethod
     def _principal(cls, env: dict) -> Principal:
@@ -134,7 +149,7 @@ class Application:
             seg = shift_path_info(env)
             if seg is None:
                 break
-            segments.append(seg)
+            segments.append(self._recode(seg))
         for route_method, route_segments, handler in self.routes:
             if route_method != method or len(route_segments) != len(segments):
                 continue
@@ -290,6 +305,54 @@ class Application:
                       body.get("category", "*"), permission),
             )
         return 201, {"granted": True}
+
+    # ---- 复核服务时限 ----
+    def _register_sla_calendar(self, p: Principal, body: dict, ctx: Context):
+        result = ctx.container.review_sla.register_calendar(
+            p, institution_id=body["institution_id"],
+            utc_offset_minutes=body.get("utc_offset_minutes", 0),
+            work_windows=body.get("work_windows", []),
+            holidays=body.get("holidays", []),
+        )
+        return (201 if result["created"] else 200), result
+
+    def _get_sla_calendar(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.review_sla.get_calendar(
+            p, ctx.match["institution_id"]
+        )
+
+    def _set_sla_policy(self, p: Principal, body: dict, ctx: Context):
+        result = ctx.container.review_sla.set_policy(
+            p, project_id=body["project_id"],
+            calendar_institution_id=body["calendar_institution_id"],
+            limit_business_seconds=body["limit_business_seconds"],
+        )
+        return (201 if result["created"] else 200), result
+
+    def _sla_sweep(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.review_sla.sweep(p)
+
+    def _sla_status(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.review_sla.status(p, ctx.match["report_id"])
+
+    def _sla_pause(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.review_sla.pause(
+            p, ctx.match["report_id"], reason=body.get("reason", "")
+        )
+
+    def _sla_resume(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.review_sla.resume(p, ctx.match["report_id"])
+
+    def _sla_evaluate(self, p: Principal, body: dict, ctx: Context):
+        return 200, ctx.container.review_sla.evaluate(p, ctx.match["report_id"])
+
+    def _list_escalations(self, p: Principal, body: dict, ctx: Context):
+        from ..domain.errors import ValidationError
+
+        project_id = ctx.query("project_id")
+        if not project_id:
+            raise ValidationError("列表查询需提供 project_id 查询参数")
+        return 200, ctx.container.review_sla.list_escalations(p, project_id)
 
 
 def _not_found(message: str):

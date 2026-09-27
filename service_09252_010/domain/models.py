@@ -188,6 +188,43 @@ class Grant:
 
 
 @dataclass(frozen=True)
+class SlaPolicy:
+    """复核时限策略：项目 × 日历机构 × 业务秒上限。"""
+
+    project_id: str
+    calendar_institution_id: str
+    limit_business_seconds: float
+    updated_by: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class SlaClock:
+    """一份报告的复核时限时钟；策略快照在物化时拷贝，此后策略调整不影响。"""
+
+    report_id: str
+    project_id: str
+    calendar_institution_id: str
+    limit_business_seconds: float
+    started_at: str
+
+
+@dataclass(frozen=True)
+class SlaEscalation:
+    """超时升级记录：每份报告恰好一条（数据库唯一约束兜底）。"""
+
+    id: str
+    report_id: str
+    project_id: str
+    calendar_institution_id: str
+    deadline_at: str | None
+    detected_at: str
+    overdue_business_seconds: float
+    detected_by: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class Principal:
     """接口层解析出的调用者。"""
 

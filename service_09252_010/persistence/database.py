@@ -145,6 +145,49 @@ CREATE TABLE IF NOT EXISTS exports (
     exported_at TEXT NOT NULL,
     digest TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sla_calendars (
+    institution_id TEXT PRIMARY KEY,
+    utc_offset_minutes INTEGER NOT NULL,
+    work_windows_json TEXT NOT NULL,
+    holidays_json TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sla_policies (
+    project_id TEXT PRIMARY KEY,
+    calendar_institution_id TEXT NOT NULL,
+    limit_business_seconds REAL NOT NULL,
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sla_clocks (
+    report_id TEXT PRIMARY KEY REFERENCES reports(id),
+    project_id TEXT NOT NULL,
+    calendar_institution_id TEXT NOT NULL,
+    limit_business_seconds REAL NOT NULL,
+    started_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sla_pauses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id TEXT NOT NULL REFERENCES sla_clocks(report_id),
+    paused_at TEXT NOT NULL,
+    resumed_at TEXT,
+    reason TEXT,
+    actor TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sla_pauses_report
+    ON sla_pauses (report_id);
+CREATE TABLE IF NOT EXISTS sla_escalations (
+    id TEXT PRIMARY KEY,
+    report_id TEXT NOT NULL UNIQUE REFERENCES sla_clocks(report_id),
+    project_id TEXT NOT NULL,
+    calendar_institution_id TEXT NOT NULL,
+    deadline_at TEXT,
+    detected_at TEXT NOT NULL,
+    overdue_business_seconds REAL NOT NULL,
+    detected_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 

@@ -15,6 +15,9 @@ from ..domain.models import (
     Report,
     ReportStatus,
     RuleStatus,
+    SlaClock,
+    SlaEscalation,
+    SlaPolicy,
     TaskStatus,
     ComputationTask,
 )
@@ -462,3 +465,197 @@ class Store:
             (report_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---- 复核服务时限（SLA）----
+    def upsert_sla_calendar(self, row: dict) -> None:
+        self.conn.execute(
+            "INSERT INTO sla_calendars (institution_id, utc_offset_minutes,"
+            " work_windows_json, holidays_json, updated_by, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(institution_id) DO UPDATE SET"
+            " utc_offset_minutes = excluded.utc_offset_minutes,"
+            " work_windows_json = excluded.work_windows_json,"
+            " holidays_json = excluded.holidays_json,"
+            " updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+            (row["institution_id"], row["utc_offset_minutes"],
+             json.dumps(row["work_windows"], sort_keys=True),
+             json.dumps(row["holidays"]),
+             row["updated_by"], row["updated_at"]),
+        )
+
+    def get_sla_calendar_row(self, institution_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM sla_calendars WHERE institution_id = ?",
+            (institution_id,),
+        ).fetchone()
+        return self._to_sla_calendar_row(row) if row else None
+
+    @staticmethod
+    def _to_sla_calendar_row(row: sqlite3.Row) -> dict:
+        return {
+            "institution_id": row["institution_id"],
+            "utc_offset_minutes": row["utc_offset_minutes"],
+            "work_windows": json.loads(row["work_windows_json"]),
+            "holidays": json.loads(row["holidays_json"]),
+            "updated_by": row["updated_by"],
+            "updated_at": row["updated_at"],
+        }
+
+    def list_sla_calendars(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM sla_calendars ORDER BY institution_id"
+        ).fetchall()
+        return [self._to_sla_calendar_row(r) for r in rows]
+
+    def upsert_sla_policy(self, policy: SlaPolicy) -> None:
+        self.conn.execute(
+            "INSERT INTO sla_policies (project_id, calendar_institution_id,"
+            " limit_business_seconds, updated_by, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(project_id) DO UPDATE SET"
+            " calendar_institution_id = excluded.calendar_institution_id,"
+            " limit_business_seconds = excluded.limit_business_seconds,"
+            " updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+            (policy.project_id, policy.calendar_institution_id,
+             policy.limit_business_seconds, policy.updated_by,
+             policy.updated_at),
+        )
+
+    def get_sla_policy(self, project_id: str) -> SlaPolicy | None:
+        row = self.conn.execute(
+            "SELECT * FROM sla_policies WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        return self._to_sla_policy(row) if row else None
+
+    @staticmethod
+    def _to_sla_policy(row: sqlite3.Row) -> SlaPolicy:
+        return SlaPolicy(
+            project_id=row["project_id"],
+            calendar_institution_id=row["calendar_institution_id"],
+            limit_business_seconds=row["limit_business_seconds"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+        )
+
+    def insert_sla_clock(self, clock: SlaClock) -> bool:
+        """物化时钟；报告已有时钟则返回 False（幂等）。"""
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO sla_clocks (report_id, project_id,"
+            " calendar_institution_id, limit_business_seconds, started_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (clock.report_id, clock.project_id, clock.calendar_institution_id,
+             clock.limit_business_seconds, clock.started_at),
+        )
+        return cur.rowcount > 0
+
+    def get_sla_clock(self, report_id: str) -> SlaClock | None:
+        row = self.conn.execute(
+            "SELECT * FROM sla_clocks WHERE report_id = ?", (report_id,)
+        ).fetchone()
+        return self._to_sla_clock(row) if row else None
+
+    def materialize_sla_clocks(self) -> int:
+        """为有待复核报告且配置了策略、但尚未物化时钟的项目补齐时钟。
+
+        起始时刻固化取报告创建时间，策略参数在物化时快照。
+        """
+        cur = self.conn.execute(
+            "INSERT INTO sla_clocks (report_id, project_id,"
+            " calendar_institution_id, limit_business_seconds, started_at)"
+            " SELECT r.id, r.project_id, p.calendar_institution_id,"
+            " p.limit_business_seconds, r.created_at"
+            " FROM reports r"
+            " JOIN sla_policies p ON p.project_id = r.project_id"
+            " LEFT JOIN sla_clocks c ON c.report_id = r.id"
+            " WHERE r.status = 'computed' AND c.report_id IS NULL"
+        )
+        return cur.rowcount
+
+    @staticmethod
+    def _to_sla_clock(row: sqlite3.Row) -> SlaClock:
+        return SlaClock(
+            report_id=row["report_id"],
+            project_id=row["project_id"],
+            calendar_institution_id=row["calendar_institution_id"],
+            limit_business_seconds=row["limit_business_seconds"],
+            started_at=row["started_at"],
+        )
+
+    def add_sla_pause(self, report_id: str, paused_at: str, reason: str | None,
+                      actor: str) -> None:
+        self.conn.execute(
+            "INSERT INTO sla_pauses (report_id, paused_at, resumed_at, reason,"
+            " actor) VALUES (?, ?, NULL, ?, ?)",
+            (report_id, paused_at, reason, actor),
+        )
+
+    def open_sla_pause(self, report_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM sla_pauses WHERE report_id = ? AND resumed_at IS NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (report_id,),
+        ).fetchone()
+
+    def resume_sla_pause(self, pause_id: int, resumed_at: str) -> None:
+        self.conn.execute(
+            "UPDATE sla_pauses SET resumed_at = ? WHERE id = ?",
+            (resumed_at, pause_id),
+        )
+
+    def list_sla_pauses(self, report_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT id, paused_at, resumed_at, reason, actor FROM sla_pauses"
+            " WHERE report_id = ? ORDER BY id",
+            (report_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_sla_escalation(self, esc: SlaEscalation) -> None:
+        """写入升级记录；每报告唯一约束保证超时恰好记录一次。"""
+        self.conn.execute(
+            "INSERT INTO sla_escalations (id, report_id, project_id,"
+            " calendar_institution_id, deadline_at, detected_at,"
+            " overdue_business_seconds, detected_by, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (esc.id, esc.report_id, esc.project_id, esc.calendar_institution_id,
+             esc.deadline_at, esc.detected_at, esc.overdue_business_seconds,
+             esc.detected_by, esc.created_at),
+        )
+
+    def get_sla_escalation(self, report_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM sla_escalations WHERE report_id = ?", (report_id,)
+        ).fetchone()
+        return self._to_sla_escalation(row) if row else None
+
+    def list_sla_escalations(self, project_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM sla_escalations WHERE project_id = ?"
+            " ORDER BY created_at, id",
+            (project_id,),
+        ).fetchall()
+        return [self._to_sla_escalation(r) for r in rows]
+
+    @staticmethod
+    def _to_sla_escalation(row: sqlite3.Row) -> dict:
+        return {
+            "escalation_id": row["id"],
+            "report_id": row["report_id"],
+            "project_id": row["project_id"],
+            "calendar_institution_id": row["calendar_institution_id"],
+            "deadline_at": row["deadline_at"],
+            "detected_at": row["detected_at"],
+            "overdue_business_seconds": row["overdue_business_seconds"],
+            "detected_by": row["detected_by"],
+            "created_at": row["created_at"],
+        }
+
+    def unescalated_sla_clocks(self) -> list[SlaClock]:
+        """全部尚未生成升级记录的时钟（含已终止的，供补记超时事实）。"""
+        rows = self.conn.execute(
+            "SELECT c.* FROM sla_clocks c"
+            " WHERE NOT EXISTS (SELECT 1 FROM sla_escalations e"
+            " WHERE e.report_id = c.report_id)"
+            " ORDER BY c.started_at"
+        ).fetchall()
+        return [self._to_sla_clock(r) for r in rows]
